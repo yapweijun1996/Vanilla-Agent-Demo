@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codex CLI Agent Demo</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Codex CLI Agent Demo</h1>
+        <p>An agentic UI inspired by the logic of the Codex CLI codebase.</p>
+
+        <div class="settings">
+            <div class="setting-item">
+                <label for="llm-provider">LLM Provider:</label>
+                <select id="llm-provider">
+                    <option value="google">Google</option>
+                    <option value="openai">OpenAI</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="llm-model">Model:</label>
+                <select id="llm-model">
+                    <!-- Models will be populated by JavaScript -->
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="api-key">API Key:</label>
+                <input type="password" id="api-key" placeholder="Enter your API key">
+            </div>
+        </div>
+
+        <div id="chat-container">
+            <div id="chat-log"></div>
+        </div>
+        
+        <div class="input-container">
+            <textarea id="user-input" placeholder="Enter your complex query here..."></textarea>
+            <button id="submit-btn">Send</button>
+        </div>
+
+        <div class="agent-thinking">
+            <h3>Agent's Thought Process</h3>
+            <pre id="agent-thought"></pre>
+        </div>
+    </div>
+
+    <script src="tools.js"></script>
+    <script src="llm_providers.js"></script>
+    <script src="agent.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
