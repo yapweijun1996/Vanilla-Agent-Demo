@@ -18,6 +18,7 @@ class Agent {
         this.maxTurns = 10; // Safety brake to prevent infinite loops
         this.toolTimeoutMs = 10000;
         this.obsTruncateChars = 3000;
+        this.callSeq = 0; // stable, monotonically increasing id seed for tool_call_id
     }
 
     // Run a promise with timeout
@@ -88,7 +89,13 @@ class Agent {
 
         for (let i = 0; i < this.maxTurns; i++) {
             // Ask model for next step (Planner)
-            const step = await this.llmProvider.getCompletion(this.history, this.tools);
+            // Only pass sanitized tool specs (name/description/usage) to the provider, not implementations.
+            const toolSpecs = Array.from(this.registry.values()).map((f) => ({
+                name: f.name,
+                description: f.description,
+                usage: f.usage,
+            }));
+            const step = await this.llmProvider.getCompletion(this.history, toolSpecs);
             const toolCalls = step.toolCalls || step.tool_calls || [];
             const stopReason = step.stopReason || step.stop_reason || 'continue';
             const content = step.content;
@@ -116,7 +123,7 @@ class Agent {
                         const id = call.id
                             || (typeof crypto !== 'undefined' && crypto.randomUUID
                                 ? crypto.randomUUID()
-                                : `call-${i}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+                                : `call-${this.callSeq++}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
                         return { id, name, args };
                     })

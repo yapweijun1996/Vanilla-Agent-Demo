@@ -1,6 +1,11 @@
 function buildSystemPrompt(tools) {
-    const toolDescriptions = tools.map(t => {
-        return `- ${t.function.name}: ${t.function.description}\n  Usage: ${t.function.usage}`;
+    // Accept either full tool objects ({ function: { name, description, usage } })
+    // or sanitized specs ({ name, description, usage })
+    const toolDescriptions = (tools || []).map((t) => {
+        const name = (t && (t.name || (t.function && t.function.name))) || 'unknown';
+        const description = (t && (t.description || (t.function && t.function.description))) || '';
+        const usage = (t && (t.usage || (t.function && t.function.usage))) || '';
+        return `- ${name}: ${description}\n  Usage: ${usage}`;
     }).join('\n');
 
     return `You are an agent that works in an iterative loop: Think -> Act (call a tool) -> Observe -> Repeat, until the task is finished.
@@ -24,50 +29,98 @@ ${toolDescriptions}
 }
 
 function tryParseToolCall(text) {
+    // Helper to robustly parse arguments which might be double-encoded or fenced
+    const robustParseArgs = (val) => {
+        if (val == null) return {};
+        if (typeof val === 'object') return val;
+        if (typeof val === 'string') {
+            let s = val.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1').trim();
+            try { return JSON.parse(s); } catch (_) {
+                try { return JSON.parse(JSON.parse(s)); } catch (_) { return {}; }
+            }
+        }
+        return {};
+    };
+
     try {
         // Strip code fences if present ```json ... ```
-        const cleaned = text.replace(/```(?:json)?\s*([\s\S]*?)\s*```/i, '$1').trim();
+        const cleaned = (text || '').replace(/```(?:json)?\s*([\s\S]*?)\s*```/i, '$1').trim();
 
-        // 1) Final-answer JSON: {"final":"..."}
+        // Prefer strict JSON parse first
+        try {
+            const obj = JSON.parse(cleaned);
+
+            // Case 1: Final answer
+            if (typeof obj.final === 'string') {
+                return { toolCalls: null, content: obj.final, stopReason: 'final' };
+            }
+
+            // Case 2: Multiple tool calls: {"tool_calls":[{name,args,id?}, ...]}
+            if (Array.isArray(obj.tool_calls)) {
+                const calls = obj.tool_calls
+                    .map((c, idx) => {
+                        const name = c?.name || c?.tool || c?.function?.name;
+                        if (!name) return null;
+                        const argsRaw = c?.arguments ?? c?.args ?? c?.function?.arguments ?? {};
+                        const args = robustParseArgs(argsRaw);
+                        const id = c?.id || name || `parsed-${Date.now()}-${idx}`;
+                        return { id, name, args };
+                    })
+                    .filter(Boolean);
+                if (calls.length > 0) {
+                    return { toolCalls: calls, content: null, stopReason: 'continue' };
+                }
+            }
+
+            // Case 3: Single tool call in object form
+            if (obj.tool || obj.name) {
+                const toolName = obj.tool || obj.name;
+                const toolArgs = robustParseArgs(obj.arguments ?? obj.args ?? {});
+                return {
+                    toolCalls: [{ id: toolName, name: toolName, args: toolArgs }],
+                    content: null,
+                    stopReason: 'continue',
+                };
+            }
+
+            // Case 4: Parsed to a plain string content
+            if (typeof obj === 'string' && obj.trim()) {
+                return { toolCalls: null, content: obj.trim(), stopReason: 'continue' };
+            }
+        } catch (_) {
+            // JSON.parse failed – fall back to regex heuristics below
+        }
+
+        // Heuristic 1: Final-answer JSON embedded in text
         const finalMatch = cleaned.match(/{\s*"final"\s*:\s*"([\s\S]*?)"\s*}/);
         if (finalMatch) {
             return { toolCalls: null, content: finalMatch[1], stopReason: 'final' };
         }
 
-        // 2) Tool-call JSON: {"tool":"name","arguments":{...}}
+        // Heuristic 2: Single tool call JSON embedded in text
         const toolMatch = cleaned.match(/{\s*["'](tool|name)["']\s*:\s*["']([^"']+)["']\s*,\s*["']arguments["']\s*:\s*({[^}]*}|"[^"]*")\s*}/);
         if (toolMatch) {
             const jsonString = toolMatch[0];
-            let parsed = JSON.parse(jsonString);
-
+            const parsed = JSON.parse(jsonString);
             const toolName = parsed.tool || parsed.name;
-            let toolArgs = parsed.arguments;
-
-            // Handle double-encoded arguments (e.g. "{\"expr\":\"1+2\"}")
-            if (typeof toolArgs === 'string') {
-                try { toolArgs = JSON.parse(toolArgs); } catch (_) { /* leave as string */ }
-            }
-
+            const toolArgs = robustParseArgs(parsed.arguments);
             if (toolName) {
                 return {
-                    toolCalls: [{
-                        id: toolName,
-                        name: toolName,
-                        args: toolArgs ?? {},
-                    }],
+                    toolCalls: [{ id: toolName, name: toolName, args: toolArgs }],
                     content: null,
                     stopReason: 'continue',
                 };
             }
         }
 
-        // 3) Otherwise treat as plain content (continue)
+        // Otherwise treat as plain content (continue)
         if (cleaned) {
             return { toolCalls: null, content: cleaned, stopReason: 'continue' };
         }
     } catch (_) {
-        // fall through
+        // swallow and fall through
     }
+
     // If nothing parsed, return raw content so the caller can treat it as normal text.
     return { toolCalls: null, content: text, stopReason: 'continue' };
 }
@@ -120,9 +173,8 @@ class GeminiProvider extends BaseLlmProvider {
         const fullHistory = [{ role: 'user', content: systemPrompt }, ...history];
 
         const contents = fullHistory.map((h) => {
-            // Gemini requires every message to have at least one text part.
-            // Some assistant messages (e.g., function-call placeholders) may have empty/undefined content.
-            // Normalize to a safe string.
+            // Gemini requires role to be either 'user' or 'model'.
+            // Map assistant -> model; all others (including 'tool' and 'user') -> user.
             let safeText = '';
             if (h && typeof h.content === 'string') {
                 safeText = h.content;
@@ -133,8 +185,7 @@ class GeminiProvider extends BaseLlmProvider {
                     safeText = '';
                 }
             }
-            // Map assistant -> model per Gemini role requirements.
-            const role = h && h.role === 'assistant' ? 'model' : (h && h.role) || 'user';
+            const role = h && h.role === 'assistant' ? 'model' : 'user';
             return {
                 role,
                 parts: [{ text: safeText }],
